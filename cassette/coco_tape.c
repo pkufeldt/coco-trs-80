@@ -552,8 +552,7 @@ print_prog(struct block *cb)
 {
 	int i, j, llen  ;
 	uint16_t lineno;
-	uint8_t eol, blkn, nl, line[80];;
-	int span = 0;
+	uint8_t eol, blkn, nl, line[1024];
 	
 	
 	while (cb && (cb->b_type != BT_DATA))
@@ -567,6 +566,7 @@ print_prog(struct block *cb)
 	i=0;
 	while(cb) {
 
+		/* Careful - this might span data blocks - not handled */
 		if (((cb->b_length - i) == 2) &&
 		    (!cb->b_data[i]) && (!cb->b_data[i+1]) && (!cb->b_data[i+2])) {
 			/* We're done here */
@@ -579,20 +579,61 @@ print_prog(struct block *cb)
 			hexdump(cb->b_data, cb->b_length);
 			exit(1);
 		}
+
+		/* next byte - remember it might span data blocks */
 		i++;
-			
-		nl = cb->b_data[i++];
-		lineno = ((uint16_t)cb->b_data[i] << 8) |
-			  (uint16_t)cb->b_data[i+1];
-		i += 2;
+		if (i == cb->b_length) {
+			/* time to jump */
+			i = 0;
+			cb = cb->b_next;
+			blkn++;
+		}
+		
+		/* Ignoring next line offset byte - using null to term a line */
+		/* nl = cb->b_data[i] */
+		
+		/* next byte - remember it might span data blocks */
+		i++;
+		if (i == cb->b_length) {
+			/* time to jump */
+			i = 0;
+			cb = cb->b_next;
+			blkn++;
+		}
+
+
+		lineno = (uint16_t)cb->b_data[i] << 8;
+
+		/* next byte - remember it might span data blocks */
+		i++;
+		if (i == cb->b_length) {
+			/* time to jump */
+			i = 0;
+			cb = cb->b_next;
+			blkn++;
+		}
+
+		lineno = lineno | (uint16_t)cb->b_data[i];
+
+		/* next byte - remember it might span data blocks */
+		i++;
+		if (i == cb->b_length) {
+			/* time to jump */
+			i = 0;
+			cb = cb->b_next;
+			blkn++;
+		}
 
 		/* Copy the line - copy because it may span blocks - 
 		 * assumes lines never longer than line buffer 
 		 */
 		j=0; llen=0;
 		while (cb->b_data[i] != 0x00) {
-			line[j++] = cb->b_data[i++];
+			line[j++] = cb->b_data[i];
 			llen++;
+
+			/* next byte - remember it might span data blocks */
+			i++;
 			if (i == cb->b_length) {
 				/* time to span */
 				i = 0;
@@ -600,19 +641,20 @@ print_prog(struct block *cb)
 				blkn++;
 			}
 		}
+
+		/* next byte - remember it might span data blocks */
 		i++;
 		if (i == cb->b_length) {
-			if (i == cb->b_length) {
-				/* time to jump */
-				i = 0;
-				cb = cb->b_next;
-				blkn++;
-			}
+			/* time to jump */
+			i = 0;
+			cb = cb->b_next;
+			blkn++;
 		}
 				
 		//printf("%d:%d [%3d] %3d ", blkn, nl, i,  lineno);
 		printf("%5d ", lineno);
 		asciidump(line, llen);
+		memset(line,0, 80);
 		printf("\n");
 	}
 		
@@ -636,11 +678,21 @@ process_bit(struct block *cb)
 	case BS_NEED_BLOCKTYPE:
 		if (cb->b_nbit == 8) {
 			printf("Found BLOCK TYPE: 0x%02x\n", cb->b_byte);
-			cb->b_type = cb->b_byte;
-			cb->b_cksum = cb->b_byte;
-			cb->b_byte = 0;
-			cb->b_nbit = 0;
-			cb->b_state = BS_NEED_LENGTH;
+			if ((cb->b_byte == BT_NAME) ||
+			    (cb->b_byte == BT_DATA) ||
+			    (cb->b_byte == BT_EOF))  {
+				    cb->b_type = cb->b_byte;
+				    cb->b_cksum = cb->b_byte;
+				    cb->b_byte = 0;
+				    cb->b_nbit = 0;
+				    cb->b_state = BS_NEED_LENGTH;
+			    } else {
+				    cb->b_byte = 0;
+				    cb->b_nbit = 0;
+				    cb->b_state = BS_NEED_SYNCBYTE;
+				    printf("Found bad block type, resetting\n");
+			    }
+				    
 		}
 		cb->b_nbit++;
 		break;
@@ -652,19 +704,24 @@ process_bit(struct block *cb)
 			cb->b_cksum += cb->b_byte;
 			cb->b_byte = 0;
 			cb->b_nbit = 0;
-			printf("TYPE: 0x%02x\n", cb->b_type);
-			if (cb->b_type == BT_NAME) {
+			if (cb->b_type == BT_NAME)  {
 				if (cb->b_length != NAMEBLOCKLEN) {
-					PRINT_ERROR("Decoding Err: name len\n");
-					return(1);
-				}
-				cb->b_state = BS_NEED_NAME;
-			}else if (cb->b_type == BT_EOF) {
+				    cb->b_byte = 0;
+				    cb->b_nbit = 0;
+				    cb->b_state = BS_NEED_SYNCBYTE;
+				    printf("TYPE: 0x%02x\n", cb->b_type);
+				    printf("Found bad block len, resetting\n");
+				} else 
+					cb->b_state = BS_NEED_NAME;
+			} else if (cb->b_type == BT_EOF) {
 				if (cb->b_length != 0) {
-					PRINT_ERROR("Decoding Err: eof len\n");
-					return(1);
-				}
-				cb->b_state = BS_NEED_CKSUM;
+				    cb->b_byte = 0;
+				    cb->b_nbit = 0;
+				    cb->b_state = BS_NEED_SYNCBYTE;
+				    printf("TYPE: 0x%02x\n", cb->b_type);
+				    printf("Found bad block len, resetting\n");
+				} else
+					cb->b_state = BS_NEED_CKSUM;
 			} else {
 				cb->b_state = BS_NEED_DATA;
 				cb->b_data = (uint8_t *)malloc(cb->b_length+1);

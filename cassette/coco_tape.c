@@ -412,8 +412,6 @@ main(int argc, char *argv[])
 		usage();
 	}
 
-
-	
 	if(!load_wav(filename, &wav)) {
 		PRINT_ERROR("Failed to load .wav");
 		return -1;
@@ -550,25 +548,32 @@ asciidump(const void* data, size_t size)
 int
 print_prog(struct block *cb)
 {
+#define LINELEN 4096
+	
 	int i, j, llen  ;
 	uint16_t lineno;
-	uint8_t eol, blkn, nl, line[1024];
+	uint8_t eol, blkn, nl, line[LINELEN];
 	
-	
+	if (cb && (cb->b_state == BS_DONE) && (cb->b_type == BT_NAME)) {
+		printf("Program: %8s\n", cb->b_progname);
+	}
+		       
 	while (cb && (cb->b_type != BT_DATA))
 		cb =cb->b_next;
 
 	if (!cb) return(0);
 	
 	blkn = cb->b_data[0];
-	printf("Block %d\n", blkn);
+	if (d_debug) printf("Block %d\n", blkn);
 	
 	i=0;
 	while(cb) {
-
-		/* Careful - this might span data blocks - not handled */
+		/* Three trailing nulls seem to terminate the data */
+		/* Careful - this might span data blocks - checked not handled */
 		if (((cb->b_length - i) == 2) &&
-		    (!cb->b_data[i]) && (!cb->b_data[i+1]) && (!cb->b_data[i+2])) {
+		    (cb->b_data[i]   == 0) &&
+		    (cb->b_data[i+1] == 0) &&
+		    (cb->b_data[i+2] == 0)) {
 			/* We're done here */
 			return(0);
 		}
@@ -640,6 +645,12 @@ print_prog(struct block *cb)
 				cb = cb->b_next;
 				blkn++;
 			}
+
+			if (j>=LINELEN) {
+				printf("Line too big for buffer (%d>=%d)\n",
+				       j, LINELEN);
+				exit(1);
+			}
 		}
 
 		/* next byte - remember it might span data blocks */
@@ -654,7 +665,7 @@ print_prog(struct block *cb)
 		//printf("%d:%d [%3d] %3d ", blkn, nl, i,  lineno);
 		printf("%5d ", lineno);
 		asciidump(line, llen);
-		memset(line,0, 80);
+		memset(line, 0, LINELEN);
 		printf("\n");
 	}
 		
@@ -668,7 +679,9 @@ process_bit(struct block *cb)
 	case BS_NEED_SYNCBYTE:
 		if (cb->b_byte == SYNCBYTE) {
 			/* Found header */
-			printf("Found header byte: 0x%02x\n", cb->b_byte);
+			if (d_debug)
+				printf("Found header byte: 0x%02x\n",
+				       cb->b_byte);
 			cb->b_byte = 0;
 			cb->b_nbit = 1;
 			cb->b_state = BS_NEED_BLOCKTYPE;
@@ -677,7 +690,8 @@ process_bit(struct block *cb)
 		
 	case BS_NEED_BLOCKTYPE:
 		if (cb->b_nbit == 8) {
-			printf("Found BLOCK TYPE: 0x%02x\n", cb->b_byte);
+			if (d_debug)
+				printf("Found BLOCK TYPE: 0x%02x\n", cb->b_byte);
 			if ((cb->b_byte == BT_NAME) ||
 			    (cb->b_byte == BT_DATA) ||
 			    (cb->b_byte == BT_EOF))  {
@@ -690,7 +704,8 @@ process_bit(struct block *cb)
 				    cb->b_byte = 0;
 				    cb->b_nbit = 0;
 				    cb->b_state = BS_NEED_SYNCBYTE;
-				    printf("Found bad block type, resetting\n");
+				    if (d_debug)
+					    printf("Found bad block type, resetting\n");
 			    }
 				    
 		}
@@ -699,7 +714,8 @@ process_bit(struct block *cb)
 		
 	case BS_NEED_LENGTH:
 		if (cb->b_nbit == 8) {
-			printf("Found LENGTH: 0x%02x\n", cb->b_byte);
+			if (d_debug)
+				printf("Found LENGTH: 0x%02x\n", cb->b_byte);
 			cb->b_length = cb->b_byte;
 			cb->b_cksum += cb->b_byte;
 			cb->b_byte = 0;
@@ -737,11 +753,13 @@ process_bit(struct block *cb)
 		
 	case BS_NEED_NAME:
 		if (cb->b_nbit == 8) {
-			printf("Found NAME BYTE: 0x%02x\n", cb->b_byte);
+			if (d_debug)
+				printf("Found NAME BYTE: 0x%02x\n", cb->b_byte);
 			cb->b_progname[cb->b_progname_i++] = cb->b_byte;
 			cb->b_cksum += cb->b_byte;
 			if (cb->b_progname_i == PROGNAMELEN) {
-				printf("Name: %s\n", cb->b_progname);
+				if (d_debug)
+					printf("Name: %s\n", cb->b_progname);
 				cb->b_state = BS_NEED_FILETYPE;
 			}
 			
@@ -753,7 +771,8 @@ process_bit(struct block *cb)
 		
 	case BS_NEED_FILETYPE:
 		if (cb->b_nbit == 8) {
-			printf("Found FILETYPE: 0x%02x\n", cb->b_byte);
+			if (d_debug)
+				printf("Found FILETYPE: 0x%02x\n", cb->b_byte);
 			cb->b_filetype = cb->b_byte;
 			cb->b_cksum += cb->b_byte;
 			cb->b_state = BS_NEED_ASCIIFLAG;
@@ -766,7 +785,8 @@ process_bit(struct block *cb)
 		
 	case BS_NEED_ASCIIFLAG:
 		if (cb->b_nbit == 8) {
-			printf("Found ASCIIFLAG: 0x%02x\n", cb->b_byte);
+			if (d_debug)
+				printf("Found ASCIIFLAG: 0x%02x\n", cb->b_byte);
 			cb->b_asciiflag = cb->b_byte;
 			cb->b_cksum += cb->b_byte;
 			cb->b_state = BS_NEED_GAPFLAG;
@@ -779,7 +799,8 @@ process_bit(struct block *cb)
 		
 	case BS_NEED_GAPFLAG:
 		if (cb->b_nbit == 8) {
-			printf("Found GAPFLAG: 0x%02x\n", cb->b_byte);
+			if (d_debug)
+				printf("Found GAPFLAG: 0x%02x\n", cb->b_byte);
 			cb->b_gapflag = cb->b_byte;
 			cb->b_cksum += cb->b_byte;
 			cb->b_state = BS_NEED_STARTADDR;
@@ -792,11 +813,14 @@ process_bit(struct block *cb)
 		
 	case BS_NEED_STARTADDR:
 		if (cb->b_nbit == 8) {
-			printf("Found START ADDR BYTE: 0x%02x\n", cb->b_byte);
+			if (d_debug)
+				printf("Found START ADDR BYTE: 0x%02x\n",
+				       cb->b_byte);
 			cb->b_mlstart[cb->b_mlstart_i++] = cb->b_byte;
 			cb->b_cksum += cb->b_byte;
 			if (cb->b_mlstart_i == MLSTARTLEN) {
-				printf("Machine Language Start: 0x%04x\n",
+				if (d_debug)
+					printf("Machine Language Start: 0x%04x\n",
 				       *(uint16_t *)cb->b_mlstart);
 				cb->b_state = BS_NEED_LOADADDR;
 			}
@@ -809,13 +833,16 @@ process_bit(struct block *cb)
 		
 	case BS_NEED_LOADADDR:
 		if (cb->b_nbit == 8) {
-			printf("Found LOAD ADDR BYTE: 0x%02x\n", cb->b_byte);
+			if (d_debug)
+				printf("Found LOAD ADDR BYTE: 0x%02x\n",
+				       cb->b_byte);
 			cb->b_mlload[cb->b_mlload_i++] = cb->b_byte;
 			cb->b_cksum += cb->b_byte;
 			cb->b_length--;
 			if (cb->b_mlload_i == MLLOADLEN) {
-				printf("Machine Language Load: 0x%04x\n",
-				       *(uint16_t *)cb->b_mlload);
+				if (d_debug)
+					printf("Machine Language Load: 0x%04x\n",
+					       *(uint16_t *)cb->b_mlload);
 				cb->b_state = BS_NEED_CKSUM;
 			}
 			cb->b_byte = 0;
@@ -826,12 +853,15 @@ process_bit(struct block *cb)
 		
 	case BS_NEED_DATA:
 		if (cb->b_nbit == 8) {
-			//printf("Found DATA: 0x%02x\n", cb->b_byte);
+			if (d_debug)
+				printf("Found DATA: 0x%02x\n", cb->b_byte);
 			cb->b_data[cb->b_data_i++] = cb->b_byte;
 			cb->b_cksum += cb->b_byte;
 			if (cb->b_length == cb->b_data_i) {
-				printf("Length: 0x%02x\n", cb->b_data_i);
-				hexdump(cb->b_data, cb->b_data_i);
+				if (d_debug) {
+					printf("Length: 0x%02x\n", cb->b_data_i);
+					hexdump(cb->b_data, cb->b_data_i);
+				}
 				cb->b_state = BS_NEED_CKSUM;
 			}
 			
@@ -844,8 +874,10 @@ process_bit(struct block *cb)
 		
 	case BS_NEED_CKSUM:
 		if (cb->b_nbit == 8) {
-			printf("Found CKSUM: 0x%02x\n", cb->b_byte);
-			printf("Checksum: 0x%02x\n", cb->b_cksum);
+			if (d_debug) {
+				printf("Found CKSUM: 0x%02x\n", cb->b_byte);
+				printf("Checksum: 0x%02x\n", cb->b_cksum);
+			}
 			if (cb->b_byte != cb->b_cksum) {
 				PRINT_ERROR("Decode Error: chksum\n");
 				return(1);
@@ -860,7 +892,8 @@ process_bit(struct block *cb)
 		
 	case BS_NEED_LEADBYTE:
 		if (cb->b_nbit == 8) {
-			printf("Found LEADBYTE: 0x%02x\n", cb->b_byte);
+			if (d_debug)
+				printf("Found LEADBYTE: 0x%02x\n", cb->b_byte);
 			cb->b_byte = 0;
 			cb->b_nbit = 0;
 			cb->b_state = BS_DONE;

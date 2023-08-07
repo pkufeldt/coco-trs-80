@@ -22,8 +22,12 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  *
- * This program takes a WAV encoded file of TRS-80 Color Computer
+ * This program takes a WAV encoded file of a TRS-80 Color Computer
  * Cassette recording and decodes it.
+ *
+ * WAV FILE INFORMATION
+ * This program only supports decoding WAV files formatted as 16-bit 
+ * 1-channel PCM at a frequency of 44100. 
  *
  * ENCODING INFORMATION 
  * The cassette format chosen uses a sinewave of 2400 or 1200 Hertz 
@@ -35,14 +39,6 @@
  * is composed of 0 to 255 bytes of data with a checksum, sync byte, 
  * and the block length. 
  * 
- * WAV FILE INFORMATION
- * This program only supports decoding WAV files formatted as 16-bit 
- * 1-channel PCM at frequency of 44100. Because the WAV file has a fixed
- * sample frequency, 1200 hertz will take more data points to represents
- * one cycle than will 2400 hertz.  So the translation from WAV file
- * data to binary data can be ass simple as counting the data point from
- * one peak to the next.
-
  * DETAILED TAPE FORMAT INFORMATION 
  * The standard TRS-80 Color Computer tape is composed of the following 
  * items: 
@@ -129,7 +125,7 @@
  * the frequency. That is an encoded 1 will have 44100/2400=18.375 data 
  * points per cycle and an encoded 0 will have 44100/1200=36.75 data 
  * points per cycle. To find a cycle this code looks for a falling zero
- * crossing in the WAV data then start counting the data points until the 
+ * crossing in the WAV data then starts counting the data points until the 
  * next falling zero crossing. 
  *
  * However, the CoCos 6 bit A/D converter made the accurancy of a 1200/2400
@@ -319,11 +315,12 @@ usage()
 
 	char msg[] = "\n\
 Where, OPTIONS are [default]:\n\
-	-0\n\
+	-d           Turn on debugging output\n\
 	-z           Low num of data points that correspond to a zero [32]\n\
 	-Z           High num of data points that correspond to a zero [inf]\n\
 	-o           Low num of data points that correspond to a one [18]\n\
 	-O           High num of data points that correspond to a one [31]\n\
+	-v           Turn on verbose output\n\
 	-?           Help\n\
 \n\
 Where, FILENAME is a 16-bit 1-channel PCM .WAV encoded file containing\n\

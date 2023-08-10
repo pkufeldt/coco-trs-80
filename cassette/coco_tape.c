@@ -111,11 +111,31 @@
  * NLDBN:NLO ISSUES
  * NLDBN:NLO seems to be inconsistent wrt to where the next line lies.
  * When NLDBN is the first data block NLO seems to point to +1 into the
- * next line. Then when NLDBN is the second data block NLO points to the 
+ * next line. Then when NLDBN is the second data block NLO points to the
  * the actual next line. Then when NLDBN is the third data block
- * NLO points to -1 of the next line and so on.  Currently this code 
- * does not use NLDBN:NLO because of this. It just searches for the 
- * next null, to terminate the line. 
+ * NLO points to -1 of the next line and so on.
+ *
+ * Current best guess is that this is due to the way the original
+ * authors chose to map a contiguous memory buffer into the
+ * the data block scheme presented above. One of the issues is that
+ * the scheme places a 255 byte limitation on data blocks making
+ * data blocks line on boundaries not aligned to 256 or 1 byte addressing.
+ * further complicating things is the fact that some lines of encoded basic
+ * can span data block.
+ *
+ * Their strategy is still not completely understood. But suffice it to
+ * say the NLO number needs an adjustment in the way of an additional byte
+ * tacked on per data block basis. For example, datablock 34, or the
+ * 4th data block, needs 4 bytes tacked on to make it accurate.
+ *
+ * This code uses the next line information to parse the data. It is non-
+ * trivial as lines that end near the end of the data block get advanced
+ * advanced to the next data block, simply adding the modifier causes
+ * offset to overflow providing inaccurate numbers. for example if the
+ * NLO was 254 and the modifier was 4 the offset would overflow to 2.
+ * IN addition the NLO points to the start of the new line but printing
+ * the current line wants to print until NLO - 1. Again the boundary
+ * conditions cause problems.
  *
  * DECODING INFORMATION
  * This program takes a simple approach to decoding the data in the WAV file.
@@ -132,7 +152,7 @@
  * fequency very suspect, plus the variability in recordings and noise, means 
  * that the WAV data is not that precise, so data counts can not be fixed 
  * numbers but rather ranges.
- * 
+ *
  * During testing it was determined that a 1 (high) was defined by the range
  * of 18-31, and a 0 (low) was 31-inf. These may prove to be slightly different
  * on a per recording basis, so params are provided to define them at runtime.
@@ -549,8 +569,12 @@ print_prog(struct block *cb)
 	
 	int i, j, llen  ;
 	uint16_t lineno;
-	uint8_t eol, blkn, nl, line[LINELEN];
-	
+	uint8_t eol, blkn, line[LINELEN];
+	struct nl {
+#define BLKNBASE 0x1e
+		uint8_t blkn, off;
+	} nl;
+
 	if (cb && (cb->b_state == BS_DONE) && (cb->b_type == BT_NAME)) {
 		printf("Program: %8s\n", cb->b_progname);
 	}
@@ -560,9 +584,14 @@ print_prog(struct block *cb)
 
 	if (!cb) return(0);
 	
-	blkn = cb->b_data[0];
+	blkn = BLKNBASE;
 	if (d_debug) printf("Block %d\n", blkn);
-	
+
+	/*
+	 * This code uses the data provided new line information to
+	 * delimit a line.  THis is non-trial code. PLease read
+	 * NLDBN:NLO ISSUES above to better understand this code.
+	 */
 	i=0;
 	while(cb) {
 		/* Three trailing nulls seem to terminate the data */
@@ -574,8 +603,10 @@ print_prog(struct block *cb)
 			/* We're done here */
 			return(0);
 		}
-		
-		if ((cb->b_data[i] != blkn) && (cb->b_data[i] != blkn+1))  {
+
+		/* set the new line block number */
+		nl.blkn = cb->b_data[i];
+		if ((nl.blkn != blkn) && (nl.blkn != blkn+1))  {
 			printf("bad start of line 0x%02x != 0x%02x 0x%02x\n",
 			       cb->b_data[i], blkn, i);
 			hexdump(cb->b_data, cb->b_length);
@@ -591,8 +622,17 @@ print_prog(struct block *cb)
 			blkn++;
 		}
 		
-		/* Ignoring next line offset byte - using null to term a line */
-		/* nl = cb->b_data[i] */
+		/*
+		 * Set the new lines offset. Add in the modifier and
+		 * subtract 1 because the data assume indexes start at 1.
+		 * care needs to be taken as adding the modifier can 
+		 * cross an actuall blk boundary necessatating the
+		 * modificationg of the provided block number.
+		 */
+		if ((nl.blkn - BLKNBASE) > (255-cb->b_data[i])) {
+			nl.blkn++;
+		}
+		nl.off = cb->b_data[i] + (nl.blkn - BLKNBASE) - 1;
 		
 		/* next byte - remember it might span data blocks */
 		i++;
@@ -603,7 +643,7 @@ print_prog(struct block *cb)
 			blkn++;
 		}
 
-
+		/* Grab the most sigicant byte of the line number */
 		lineno = (uint16_t)cb->b_data[i] << 8;
 
 		/* next byte - remember it might span data blocks */
@@ -615,6 +655,7 @@ print_prog(struct block *cb)
 			blkn++;
 		}
 
+		/* Grab the least sigicant byte of the line number */
 		lineno = lineno | (uint16_t)cb->b_data[i];
 
 		/* next byte - remember it might span data blocks */
@@ -626,11 +667,9 @@ print_prog(struct block *cb)
 			blkn++;
 		}
 
-		/* Copy the line - copy because it may span blocks - 
-		 * assumes lines never longer than line buffer 
-		 */
+		/* Copy the line - copy because it may span blocks */
 		j=0; llen=0;
-		while (cb->b_data[i] != 0x00) {
+		while (1) {
 			line[j++] = cb->b_data[i];
 			llen++;
 
@@ -648,6 +687,19 @@ print_prog(struct block *cb)
 				       j, LINELEN);
 				exit(1);
 			}
+
+			/*
+			 * check to see if we have arrived at the last byte,
+			 * NLO - 1
+			 * two cases here the nominal case nl.off is nonzero
+			 * and the boundary case where nl.off is zero making
+			 * -1 not possible, so the code manual backs it up
+			 * to check.
+			 */
+			if (nl.off  && (blkn == nl.blkn) && (i == nl.off - 1))
+				break;
+			if (!nl.off && (blkn == nl.blkn-1) && (i == 254))
+				break;
 		}
 
 		/* next byte - remember it might span data blocks */
@@ -658,8 +710,7 @@ print_prog(struct block *cb)
 			cb = cb->b_next;
 			blkn++;
 		}
-				
-		//printf("%d:%d [%3d] %3d ", blkn, nl, i,  lineno);
+
 		printf("%5d ", lineno);
 		asciidump(line, llen);
 		memset(line, 0, LINELEN);
@@ -850,13 +901,13 @@ process_bit(struct block *cb)
 		
 	case BS_NEED_DATA:
 		if (cb->b_nbit == 8) {
-			if (d_debug)
-				printf("Found DATA: 0x%02x\n", cb->b_byte);
 			cb->b_data[cb->b_data_i++] = cb->b_byte;
 			cb->b_cksum += cb->b_byte;
 			if (cb->b_length == cb->b_data_i) {
 				if (d_debug) {
-					printf("Length: 0x%02x\n", cb->b_data_i);
+					printf("Found DATA: \n");
+					printf("Length: 0x%02x\n",
+					       cb->b_data_i);
 					hexdump(cb->b_data, cb->b_data_i);
 				}
 				cb->b_state = BS_NEED_CKSUM;
